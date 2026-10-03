@@ -43,7 +43,7 @@ The three numeric columns are linked by `total_spent = quantity × price_per_uni
 
 Where the price itself was missing but the item was known, I filled it from `dim_item`. That unlocked a further 32 rows: once the price was known, the missing quantity or total could also be calculated.
 
-This recovered 1,430 rows — 96.6% of the 1,514 missing numeric values. The remaining 52 are rows where two of the three values are missing, so nothing can be derived.
+This repaired 1,430 rows, recovering 1,462 of the 1,514 missing numeric values (96.6%). The remaining 52 values sit in 26 rows where two of the three are missing, so nothing can be derived.
 
 ### Validation
 
@@ -56,7 +56,7 @@ This recovered 1,430 rows — 96.6% of the 1,514 missing numeric values. The rem
 
 Remaining nulls: item 969, quantity 23, price_per_unit 6, total_spent 23, payment_method 3,178, location 3,961, transaction_date 460.
 
-The numbers reconcile from both directions: 479 + 533 + 502 = 1,514 missing values, of which 52 remain — and those 52 are exactly the two missing fields in each of the 26 rows that had two gaps.
+The numbers reconcile from both directions: 479 + 533 + 502 = 1,514 missing values. 1,398 rows were missing one value and 58 were missing two (1,398 + 116 = 1,514). Of those 58, the 32 with a missing price were unlocked by dim_item; the remaining 26 rows account for exactly the 52 values still null.
 
 Every repaired row carries `is_recovered = 1`, so a calculated value can always be told apart from a recorded one.
 
