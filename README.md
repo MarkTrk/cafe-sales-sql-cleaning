@@ -1,8 +1,8 @@
-# Cafe Sales — SQL data cleaning
+# Cafe Sales — SQL cleaning pipeline and Power BI report
 
-This project cleans a 10,000-row Kaggle dataset of coffee shop transactions ([Cafe Sales — Dirty Data for Cleaning Training](https://www.kaggle.com/datasets/ahmedmohamed2003/cafe-sales-dirty-data-for-cleaning-training)). The raw data contains `ERROR` and `UNKNOWN` placeholders and empty values across every column. I rebuilt it in MySQL as a staging → clean pipeline and recovered 96.6% of the missing numeric values from relationships within the data.
+This project cleans a 10,000-row Kaggle dataset of coffee shop transactions ([Cafe Sales — Dirty Data for Cleaning Training](https://www.kaggle.com/datasets/ahmedmohamed2003/cafe-sales-dirty-data-for-cleaning-training)). The raw data contains `ERROR` and `UNKNOWN` placeholders and empty values across every column. I rebuilt it in MySQL as a staging → clean → reporting pipeline, recovered 96.6% of the missing numeric values from relationships within the data, and built a three-page Power BI report on top of it.
 
-Everything here is SQL. The scripts are the deliverable.
+The SQL scripts and the `.pbix` are both deliverables. The report is included as source: the theme is a JSON file in this repo, not a set of clicks.
 
 ## The data problem
 
@@ -37,13 +37,15 @@ I also created `dim_item`, a table holding each item with its price, derived fro
 
 I left unrecoverable values as `NULL`, which means "not known". I did not substitute zeros: a zero would be included in an average, a `NULL` is skipped.
 
+The third stage is `06_reporting_views.sql`, added when the report was built. It is covered under [Reporting layer](#reporting-layer) below.
+
 ## Recovery
 
 The three numeric columns are linked by `total_spent = quantity × price_per_unit`. I verified this on every row where all three values are present: zero exceptions. Where exactly one value was missing, I calculated it from the other two.
 
 Where the price itself was missing but the item was known, I filled it from `dim_item`. That unlocked a further 32 rows: once the price was known, the missing quantity or total could also be calculated.
 
-This repaired 1,430 rows, recovering 1,462 of the 1,514 missing numeric values (96.6%). The remaining 52 values sit in 26 rows where two of the three are missing, so nothing can be derived.
+This recovered 1,430 rows — 96.6% of the 1,514 missing numeric values. The remaining 52 are rows where two of the three values are missing, so nothing can be derived.
 
 ### Validation
 
@@ -56,7 +58,7 @@ This repaired 1,430 rows, recovering 1,462 of the 1,514 missing numeric values (
 
 Remaining nulls: item 969, quantity 23, price_per_unit 6, total_spent 23, payment_method 3,178, location 3,961, transaction_date 460.
 
-The numbers reconcile from both directions: 479 + 533 + 502 = 1,514 missing values. 1,398 rows were missing one value and 58 were missing two (1,398 + 116 = 1,514). Of those 58, the 32 with a missing price were unlocked by dim_item; the remaining 26 rows account for exactly the 52 values still null.
+The numbers reconcile from both directions: 479 + 533 + 502 = 1,514 missing values, of which 52 remain — and those 52 are exactly the two missing fields in each of the 26 rows that had two gaps.
 
 Every repaired row carries `is_recovered = 1`, so a calculated value can always be told apart from a recorded one.
 
@@ -94,16 +96,85 @@ Four independent signals say it is generated rather than collected:
 
 A real coffee shop would show a weekend effect at least. This does not make the dataset less useful for practising data cleaning, but it rules out drawing business conclusions from the patterns — because there are none.
 
+---
+
+## Reporting layer
+
+`06_reporting_views.sql` sits between the cleansed tables and Power BI. It adds two views and changes no data.
+
+The rule it enforces: **`clean_cafe` keeps `NULL` where a value is genuinely missing. `'Unknown'` is a reporting label, created in the view layer and nowhere else.** The cleansed layer never pretends to know something it doesn't, and the report can still draw the gap as a visible category.
+
+| View | What it does |
+|---|---|
+| `v_cafe_sales` | The fact view. `COALESCE` to `'Unknown'` on the three text columns that can be missing. |
+| `v_dim_item` | The dimension view. `dim_item` plus an `'Unknown'` row added with `UNION ALL`. |
+
+Two details worth stating:
+
+**`COALESCE` is applied to text columns only.** On a numeric or date column it coerces the type and destroys the aggregation — `SUM`, the date hierarchy and every time intelligence measure would break. `transaction_date` therefore keeps its `NULL`s.
+
+**`dim_item` cannot hold the `'Unknown'` row itself.** `price_per_unit` is `NOT NULL` and constrained to be positive, and an unidentified product has no price. Those constraints are correct, so the label is added in the view instead. Without that row, Power BI silently routes the unmatched fact rows to an auto-generated blank row.
+
+Power BI connects through a read-only service account scoped to this schema — never the root account. The grant is documented at the end of `06_reporting_views.sql`.
+
+## Power BI report
+
+Three pages, each answering one question. `powerbi/cafe_sales.pbix`.
+
+### 1 — How did the café trade in 2023?
+
+![How did the café trade in 2023](powerbi/screenshots/01-how-did-the-cafe-trade.png)
+
+> Trade was flat all year — no summer lift, no Christmas peak, which is odd enough for a café to raise questions about the source. And 14.3% of this revenue exists only because cleaning recovered it, so read every total as a floor, not a fact.
+
+### 2 — Where and how did they pay?
+
+![Where and how did they pay](powerbi/screenshots/02-where-and-how-did-they-pay.png)
+
+> Both splits look even — in-store against takeaway, and the three payment methods alike. The gaps are not value-biased, since the share of rows missing a field matches the share of revenue almost exactly; but nothing here can rule out that a whole category is hiding inside Unknown, so read these splits as plausible, not verified. The two figures cannot be added — 5,845 transactions are missing at least one of them.
+
+### 3 — What's behind the totals?
+
+![What's behind the totals](powerbi/screenshots/03-whats-behind-the-totals.png)
+
+> Recovered revenue runs between 12.75% and 15.51% for every item on this list — nine rows, barely three points apart. A systematic cause, one till or one shift or one category, would leave an outlier somewhere; there isn't one, so the gaps in this dataset look random rather than structural.
+
+### How it is built
+
+A star schema over the two reporting views: `v_cafe_sales` as the fact table, `v_dim_item` and a `CALENDARAUTO()` date table as dimensions. Sixteen DAX measures live in a separate `_Measures` table, including `CALCULATE` with `ALL` for share-of-total, `PREVIOUSMONTH` for month on month, and `DATESYTD` for the running total.
+
+Filters and groupings come from the dimensions, never from the fact table. That is what makes `ALL('dim_item'[ITEM])` work: the filter originates in the dimension, so that is the only place it can be removed. `ALL('clean_cafe'[ITEM])` returns 100% without raising an error — a wrong answer that looks right.
+
+### Two decisions worth defending
+
+**`Unknown` is shown, not filtered out.** It is the tallest bar on both charts on page 2. Hiding it would make the report look cleaner and say something false: that the splits are measured. They are measured across 60% and 69% of the revenue. The grey tells the reader which bar is a gap rather than a category.
+
+**The undated £4,174 stays visible.** It has no month, so it cannot sit inside a running total — which is why the page 3 total (£89,096) does not match the year-to-date column (£84,923). The subtitle says so. Filtering the row out would make the two numbers agree and lose £4,174 without telling anyone.
+
+### Colour rule
+
+| Colour | Meaning |
+|---|---|
+| Roast `#6B4330` | recorded data |
+| Ash `#C2B8AC` | a gap, not a category — used only for `Unknown` |
+| Burnt caramel `#A8481F` | anything about how far to trust the number |
+
+Everything else is background and text. The palette is in `powerbi/cafe-2023-roast-theme.json`.
+
 ## Files
 
 | File | What it does |
 |---|---|
-| `01_staging_load.sql` | Creates the schema and `stg_cafe`, loads the CSV, validates the load |
-| `02_profiling.sql` | Column-level damage: `v_dq_column_summary` (totals per column) and `v_dq_issue_detail` (which placeholder, how many times) |
-| `03_profiling.sql` | Row-level damage: `v_dq_pct_report` (how many fields are missing per row) and `v_dq_fixable` (how many rows are recoverable) |
-| `04_clean_cafe.sql` | Builds `clean_cafe` and `dim_item`, runs the recovery, validates the result |
-| `05_analysis.sql` | The six questions above |
+| `sql/01_staging_load.sql` | Creates the schema and `stg_cafe`, loads the CSV, validates the load |
+| `sql/02_profiling.sql` | Column-level damage: `v_dq_column_summary` (totals per column) and `v_dq_issue_detail` (which placeholder, how many times) |
+| `sql/03_clean.sql` | Row-level damage: `v_dq_pct_report` (how many fields are missing per row) and `v_dq_fixable` (how many rows are recoverable) |
+| `sql/04_clean_cafe.sql` | Builds `clean_cafe` and `dim_item`, runs the recovery, validates the result |
+| `sql/05_analysis.sql` | The five analysis queries behind the findings above |
+| `sql/06_reporting_views.sql` | `v_cafe_sales` and `v_dim_item` — the layer Power BI connects to |
+| `powerbi/cafe_sales.pbix` | The three-page report |
+| `powerbi/cafe-2023-roast-theme.json` | The report theme: palette, fonts, default visual styles |
+| `data/dirty_cafe_sales.csv` | The raw Kaggle file, so the pipeline runs end to end |
 
-Run them in order. Each script drops and recreates what it builds, so the whole pipeline can be rebuilt from the raw CSV at any time.
+Run the SQL in order. Each script drops and recreates what it builds, so the whole pipeline can be rebuilt from the raw CSV at any time.
 
-**Requirements:** MySQL 8.0.16 or later (`CHECK` constraints are not enforced before that). `LOAD DATA LOCAL INFILE` needs `local_infile` enabled on the server and `OPT_LOCAL_INFILE=1` in the Workbench connection.
+**Requirements:** MySQL 8.0.16 or later (`CHECK` constraints are not enforced before that). `LOAD DATA LOCAL INFILE` needs `local_infile` enabled on the server and `OPT_LOCAL_INFILE=1` in the Workbench connection. Power BI Desktop for the `.pbix`; the file contains the imported data, so it opens without a database connection.
